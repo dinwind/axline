@@ -262,7 +262,8 @@
 	],
 	"sessionsWindowAllowedExtensions": [],
 	"configurationDefaults": {
-		"workbench.startupEditor": "none"
+		"workbench.startupEditor": "none",
+		"workbench.editor.showTabs": "none"
 	},
 	"voiceWsUrl": "wss://falcon-caas.mai.microsoft.com/voice-code/api/v1/realtime/voice"
 }
