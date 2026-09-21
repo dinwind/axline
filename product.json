@@ -87,8 +87,8 @@
 		},
 		{
 			"name": "axline.axline",
-			"version": "0.4.97",
-			"sha256": "f9f33b200354dbc6ee8e81304e5af45f75858178615855e15459e9a93f38fc13",
+			"version": "0.4.98",
+			"sha256": "3fd2046e998ff46587a9b4d5d0d52f904659870b3524e985bd0910eec7eab9e1",
 			"vsix": "scripts/axline.vsix",
 			"repo": "https://github.com/dinwind/xline.git",
 			"metadata": {

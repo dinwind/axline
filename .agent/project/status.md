@@ -17,6 +17,8 @@ Build environment bootstrapped on Windows x64; first full compilation succeeded.
 - [x] Create scripts/build.bat (install/compile/rebuild/run/watch/clean) with VS 2026 vcvars detection and delayed-expansion path handling
 - [x] Bootstrap AxLines build environment: installed VS 2026 Spectre libs, upgraded Node to 24.21.0, fixed MSB8040 native-module build (native-watchdog/native-is-elevated .node produced), achieved first full compile (63 tasks, 0 errors)
 - [x] Fix fake logged-in state after failed AxGate login: restore/login no longer fabricate UUID-only identities; webview keeps sign-in form until a verified profile exists
+- [x] Pull Axline 0.4.98 (ALPHA) from AuthNexus share link, extract to `.build/builtInExtensions/axline.axline`, update `product.json` version+sha256
+- [x] Wire `axlineStartup.contribution.ts` to invoke `axline.openChatPanel` (0.4.98 `WebviewPanel` support) instead of the splash editor; removed redundant `AxlineChatEditor`/`AxlineChatEditorInput`/`axlineChatEditor.contribution.ts`
 
 ## Blockers
 
