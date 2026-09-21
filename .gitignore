@@ -105,4 +105,11 @@ dist
 scripts/__pycache__/
 scripts/axline-vsix-unpacked/
 scripts/icon-backup/
-src/vs/workbench/contrib/axline/
+# Ignore axline vsix unpacked contents, but track our source files
+src/vs/workbench/contrib/axline/*
+!src/vs/workbench/contrib/axline/browser/
+src/vs/workbench/contrib/axline/browser/*
+!src/vs/workbench/contrib/axline/browser/axlineChatEditorInput.ts
+!src/vs/workbench/contrib/axline/browser/axlineChatEditor.ts
+!src/vs/workbench/contrib/axline/browser/axlineChatEditor.contribution.ts
+!src/vs/workbench/contrib/axline/browser/axlineStartup.contribution.ts

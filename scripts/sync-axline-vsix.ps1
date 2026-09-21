@@ -8,13 +8,17 @@
 #   3. If outdated/missing, download and replace the local .vsix.
 #   4. Optionally update product.json (version + sha256) so the build embeds
 #      the matching artifact.
+#   5. Patch the extension/package.json inside the vsix to add Axlines-specific
+#      menu contributions (accountsContext and globalActivity) so that the
+#      Axline settings/account buttons appear in the activity-bar bottom menus
+#      when running as a built-in extension under AxLines (no sidebar toolbar).
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-axline-vsix.ps1
 #   powershell ... -UpdateProductJson   (also keep product.json axline.axline entry in sync)
 #
 param(
-    [string]$Token        = "lHj0ZFT8JJub6_KVo12hifkgUlR1liW0",
+    [string]$Token        = "-HHiPJNkc_BlXmwGMY-ZxPbu6Oh5LLWy",
     [string]$VsixPath     = "",                                # defaults to <repo>\scripts\axline.vsix
     [switch]$UpdateProductJson,
     [switch]$Force
@@ -130,10 +134,172 @@ if (Test-Path $VsixPath) { Remove-Item $VsixPath -Force }
 Move-Item $tmp $VsixPath
 Write-Step ("Saved   : {0} ({1} bytes)" -f $VsixPath, (Get-Item $VsixPath).Length)
 
-# --- 4. Optionally sync product.json -------------------------------------
-# Uses targeted string patching (not ConvertTo-Json round-trip) so the rest of
-# product.json (formatting, key order, unrelated fields) is never touched.
+# --- 4. Patch the vsix-internal package.json ---------------------------------
+# Inject accountsContext and globalActivity menu contributions so that the
+# Axline settings/account/feedback/report commands appear in the VS Code
+# activity-bar bottom menus when Axline runs as a built-in extension without
+# a sidebar toolbar.
+function Patch-VsixPackageJson {
+    param([string]$VsixFilePath)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $vsixAbs = [System.IO.Path]::GetFullPath($VsixFilePath)
+    $tmpPath = "$vsixAbs.patched.tmp"
+
+    $pkgJsonPath = "extension/package.json"
+    $pkgContent   = $null
+
+    # Read the original package.json from inside the vsix.
+    $zipIn  = [System.IO.Compression.ZipFile]::OpenRead($vsixAbs)
+    try {
+        $entry = $zipIn.GetEntry($pkgJsonPath)
+        if (-not $entry) {
+            Write-Host "[WARN] $pkgJsonPath not found inside vsix — skipping menu patch." -ForegroundColor Yellow
+            return
+        }
+        $stream = $entry.Open()
+        try {
+            $reader = [System.IO.StreamReader]::new($stream)
+            $pkgContent = $reader.ReadToEnd()
+            $reader.Dispose()
+        }
+        finally { $stream.Dispose() }
+    }
+    finally { $zipIn.Dispose() }
+
+    # Check whether the menus are already present (idempotent).
+    if ($pkgContent -match '"accountsContext"' -and $pkgContent -match '"globalActivity"') {
+        Write-Step "package.json inside vsix already has menu patches — skipped."
+        return
+    }
+
+    # Locate the `"menus"` block inside the contributes object.
+    # We insert new entries before the closing `]` of the "view/title" array so
+    # they appear as a separate menu key after the existing view/title block.
+    # Alternatively we append after the closing `]` of the last menu entry.
+    #
+    # Strategy: find the `"menus" : {` block, then find the closing `}` of the
+    # whole menus object.  Insert new keys just before that closing brace.
+    $menusMatch = [regex]::Match($pkgContent, '("menus"\s*:\s*\{)')
+    if (-not $menusMatch.Success) {
+        Write-Host "[WARN] 'menus' key not found in vsix package.json — skipping menu patch." -ForegroundColor Yellow
+        return
+    }
+
+    # Find the matching closing brace for the menus object.
+    $braceCount = 0
+    $started    = $false
+    $menusEnd   = -1
+    for ($i = $menusMatch.Index; $i -lt $pkgContent.Length; $i++) {
+        $ch = $pkgContent[$i]
+        if ($ch -eq '{') { $braceCount++; $started = $true }
+        elseif ($ch -eq '}') {
+            $braceCount--
+            if ($started -and $braceCount -eq 0) {
+                $menusEnd = $i
+                break
+            }
+        }
+    }
+
+    if ($menusEnd -lt 0) {
+        Write-Host "[WARN] Could not locate closing brace of 'menus' object — skipping menu patch." -ForegroundColor Yellow
+        return
+    }
+
+    # Build the new menu entries to inject.
+    $accountsContextMenus = @'
+,
+        "accountsContext": [
+            {
+                "command": "axline.accountButtonClicked",
+                "group": "1_accounts@1"
+            },
+            {
+                "command": "axline.openFeedback",
+                "group": "1_accounts@2"
+            }
+        ],
+        "globalActivity": [
+            {
+                "command": "axline.settingsButtonClicked",
+                "group": "0_settings@1"
+            },
+            {
+                "command": "axline.reportIssue",
+                "group": "0_settings@2"
+            }
+        ]
+'@
+
+    # Insert the new entries before the closing brace of the menus object.
+    $patchedContent = $pkgContent.Substring(0, $menusEnd) + $accountsContextMenus + $pkgContent.Substring($menusEnd)
+
+    # Validate JSON round-trip.
+    try {
+        $null = $patchedContent | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "[ERROR] Patched package.json is not valid JSON — skipping vsix modification." -ForegroundColor Red
+        return
+    }
+
+    # Write patched vsix.
+    $outZip = [System.IO.Compression.ZipFile]::Open($tmpPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $zipIn = [System.IO.Compression.ZipFile]::OpenRead($vsixAbs)
+        try {
+            foreach ($entry in $zipIn.Entries) {
+                if ($entry.FullName -eq $pkgJsonPath) {
+                    $newEntry = $outZip.CreateEntry($pkgJsonPath, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $s = $newEntry.Open()
+                    try {
+                        $w = [System.IO.StreamWriter]::new($s, [System.Text.UTF8Encoding]::new($false))
+                        $w.Write($patchedContent)
+                        $w.Flush()
+                        $w.Dispose()
+                    }
+                    finally { if ($s) { $s.Dispose() } }
+                }
+                else {
+                    # Copy all other entries verbatim.
+                    $newEntry = $outZip.CreateEntry($entry.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $src = $entry.Open()
+                    try {
+                        $dst = $newEntry.Open()
+                        try { $src.CopyTo($dst) }
+                        finally { if ($dst) { $dst.Dispose() } }
+                    }
+                    finally { if ($src) { $src.Dispose() } }
+                }
+            }
+        }
+        finally { $zipIn.Dispose() }
+    }
+    catch {
+        $outZip.Dispose()
+        if (Test-Path $tmpPath) { Remove-Item $tmpPath -Force }
+        throw
+    }
+    $outZip.Dispose()
+
+    # Replace original with patched version.
+    Remove-Item $vsixAbs -Force
+    Move-Item $tmpPath $vsixAbs
+    Write-Step "Injected accountsContext & globalActivity into vsix package.json."
+}
+
+# Only patch if we actually downloaded a fresh vsix.
+if ($needsDownload) {
+    Patch-VsixPackageJson -VsixFilePath $VsixPath
+}
+
+# --- 5. Update product.json (after patch) -----------------------------------
+# The patch changes vsix sha256, so this must run AFTER patching.
 if ($UpdateProductJson) {
+    $effectiveHash = Get-Sha256 -Path $VsixPath
+
     if (-not (Test-Path $ProductJson)) {
         Write-Host "[ERROR] product.json not found: $ProductJson" -ForegroundColor Red
         exit 1
@@ -141,7 +307,6 @@ if ($UpdateProductJson) {
 
     $raw = [System.IO.File]::ReadAllText($ProductJson)
 
-    # Locate the builtInExtensions entry named "axline.axline".
     $nameEsc = [regex]::Escape($ExtensionKey)
     $namePattern = '"name"\s*:\s*"' + $nameEsc + '"'
     $nameMatch  = [regex]::Match($raw, $namePattern)
@@ -151,38 +316,22 @@ if ($UpdateProductJson) {
     }
 
     $blockStart = $raw.LastIndexOf('{', $nameMatch.Index)
-    if ($blockStart -lt 0) {
-        Write-Host "[ERROR] Could not locate the '$ExtensionKey' entry object in product.json." -ForegroundColor Red
-        exit 1
-    }
     $blockEnd = $raw.IndexOf('}', $nameMatch.Index)
-    if ($blockEnd -lt 0) {
-        Write-Host "[ERROR] Malformed '$ExtensionKey' entry in product.json." -ForegroundColor Red
-        exit 1
-    }
     $block = $raw.Substring($blockStart, $blockEnd - $blockStart + 1)
 
     $changed = $false
 
-    # Patch version
     if ($block -notmatch ('"version"\s*:\s*"' + [regex]::Escape($latestVersion) + '"')) {
         $newBlock = [regex]::Replace($block, '("version"\s*:\s*")[^"]*(")', ('${1}' + $latestVersion + '${2}'))
-        if ($newBlock -ne $block) {
-            $block = $newBlock
-            $changed = $true
-            Write-Step "product.json version: -> $latestVersion"
-        }
+        if ($newBlock -ne $block) { $block = $newBlock; $changed = $true
+            Write-Step "product.json version: -> $latestVersion" }
     }
 
-    # Patch sha256
-    $wantHash = $latestHash.ToLower()
+    $wantHash = $effectiveHash.ToLower()
     if ($block -notmatch ('"sha256"\s*:\s*"' + [regex]::Escape($wantHash) + '"')) {
         $newBlock = [regex]::Replace($block, '("sha256"\s*:\s*")[^"]*(")', ('${1}' + $wantHash + '${2}'))
-        if ($newBlock -ne $block) {
-            $block = $newBlock
-            $changed = $true
-            Write-Step "product.json sha256 : -> $wantHash"
-        }
+        if ($newBlock -ne $block) { $block = $newBlock; $changed = $true
+            Write-Step "product.json sha256 : -> $wantHash" }
     }
 
     if ($changed) {

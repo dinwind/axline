@@ -4,7 +4,17 @@ setlocal EnableDelayedExpansion
 REM ============================================================================
 REM AxLine VS Code Build Script - Windows x64
 REM Prerequisites: Node.js 24.18.0+, VS 2026/2022 C++ tools, Python 3.x
-REM Usage: scripts\build.bat [install|compile|rebuild|run|watch|clean|sync-axline]
+REM
+REM Usage:
+REM   scripts\build.bat [install|compile|rebuild|run|watch|clean|sync-axline|check]
+REM
+REM Sub-commands:
+REM   run         foreground mode — keeps Electron attached to console so errors
+REM               are visible.  Ctrl+C quits.
+REM   run-bg      background mode (old behaviour) — detaches via `start`, silent
+REM               on errors.  Use `check` first when something goes wrong.
+REM   check       verify compiled output, Electron version, and Axline extension
+REM               integrity before launching (fast, ~1 s).
 REM ============================================================================
 
 set "PROJECT_ROOT=%~dp0.."
@@ -49,13 +59,15 @@ if /i "%~1"=="rebuild" goto :rebuild
 if /i "%~1"=="install" goto :install
 if /i "%~1"=="compile" goto :compile
 if /i "%~1"=="run"     goto :run
+if /i "%~1"=="run-bg"  goto :run_bg
+if /i "%~1"=="check"   goto :check
 if /i "%~1"=="watch"   goto :watch
 if /i "%~1"=="clean"   goto :clean
 if /i "%~1"=="-h"      goto :help
 if /i "%~1"=="--help"  goto :help
 echo [ERROR] Unknown: %~1
 :help
-echo Usage: scripts\build.bat [install^|compile^|rebuild^|run^|watch^|clean^|sync-axline]
+echo Usage: scripts\build.bat [install^|compile^|rebuild^|run^|run-bg^|watch^|clean^|sync-axline^|check]
 exit /b 0
 
 REM =====================================================================
@@ -117,7 +129,7 @@ goto :eof
 
 REM =====================================================================
 :run
-echo [RUN] Build ^& launch VS Code...
+echo [RUN] Build ^& launch VS Code (foreground)...
 call :sync_axline || exit /b 1
 if not exist node_modules (call :install || exit /b 1)
 if not exist out (call :compile || exit /b 1)
@@ -138,8 +150,118 @@ if not exist "!CODE!" (
 set NODE_ENV=development
 set VSCODE_DEV=1
 set VSCODE_CLI=1
+REM --- Patch Electron 42 ESM compatibility (Menu export) ---------------
+call :patch_main_js_menu
+REM ---------------------------------------------------------------------
+echo [RUN] Launching Electron (errors will appear here)...
+"!CODE!" . --disable-extension=vscode.vscode-api-tests
+goto :eof
+
+REM =====================================================================
+:run_bg
+echo [RUN] Build ^& launch VS Code (background)...
+call :sync_axline || exit /b 1
+if not exist node_modules (call :install || exit /b 1)
+if not exist out (call :compile || exit /b 1)
+echo [RUN] Pre-launch setup...
+node build\lib\preLaunch.ts
+if errorlevel 1 (
+    echo [ERROR] preLaunch failed.
+    exit /b 1
+)
+for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\".*" product.json') do set "EXE=%%~a.exe"
+set "EXE=!EXE: "=!"
+set "EXE=!EXE:"=!"
+set "CODE=.build\electron\!EXE!"
+if not exist "!CODE!" (
+    echo [ERROR] Electron not found: !CODE!
+    exit /b 1
+)
+set NODE_ENV=development
+set VSCODE_DEV=1
+set VSCODE_CLI=1
+call :patch_main_js_menu
 start "" "!CODE!" . --disable-extension=vscode.vscode-api-tests
-echo [RUN] VS Code launched.
+echo [RUN] VS Code launched (detached — use `check` if window doesn't appear).
+goto :eof
+
+REM =====================================================================
+REM Quick integrity check: compiled output, Electron version, Axline ext.
+REM =====================================================================
+:check
+echo [CHECK] Verifying build integrity...
+set OK=1
+
+REM 1 — compiled output
+if not exist out\main.js (
+    echo [CHECK] FAIL: out\main.js missing — run scripts\build.bat compile
+    set OK=0
+) else (
+    echo [CHECK] PASS: out\main.js present
+)
+
+REM 2 — Electron binary
+for /f "tokens=2 delims=:," %%a in ('findstr /R /C:"\"nameShort\".*" product.json') do set "EXE=%%~a.exe"
+set "EXE=!EXE: "=!"
+set "EXE=!EXE:"=!"
+set "CODE=.build\electron\!EXE!"
+if not exist "!CODE!" (
+    echo [CHECK] FAIL: Electron binary not found — run scripts\build.bat compile
+    set OK=0
+) else (
+    echo [CHECK] PASS: Electron binary !CODE!
+)
+
+REM 3 — Electron version compatibility
+if exist .build\electron\version (
+    for /f %%v in (.build\electron\version) do set "EVER=%%v"
+    echo [CHECK] INFO: Electron !EVER!
+)
+
+REM 4 — Node.js compatibility
+for /f "tokens=*" %%v in ('node -v') do echo [CHECK] INFO: Node %%v
+
+REM 5 — Axline extension
+if exist .build\builtInExtensions\axline.axline\package.json (
+    powershell -NoProfile -Command "$v=(Get-Content '.build\builtInExtensions\axline.axline\package.json'|ConvertFrom-Json).version; Write-Host \"[CHECK] PASS: Axline extension $v\""
+) else (
+    echo [CHECK] FAIL: Axline extension not extracted — run scripts\build.bat compile
+    set OK=0
+)
+
+REM 6 — menu patch status
+findstr /C:"Menu?.setApplicationMenu" out\main.js >nul 2>&1
+if errorlevel 1 (
+    echo [CHECK] WARN: main.js Menu patch not detected — run may fail on Electron 42
+) else (
+    echo [CHECK] PASS: main.js Electron 42 Menu compatibility patch applied
+)
+
+if !OK!==0 (
+    echo [CHECK] Some checks FAILed.  Run: scripts\build.bat compile
+    exit /b 1
+)
+echo [CHECK] All checks passed.
+goto :eof
+
+REM =====================================================================
+REM Patch out\main.js for Electron 42 ESM compatibility.
+REM Electron 42 does not export `Menu` via named ESM import.
+REM We rewrite `import { ..., Menu, ... } from "electron"` to a CJS
+REM require so `Menu.setApplicationMenu(null)` still works.
+REM =====================================================================
+:patch_main_js_menu
+if not exist out\main.js goto :eof
+findstr /C:"Menu?.setApplicationMenu" out\main.js >nul 2>&1
+if not errorlevel 1 goto :eof
+echo [RUN] Patching out\main.js for Electron 42 Menu compatibility...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$c = [System.IO.File]::ReadAllText('out\main.js'); ^
+   $old = 'import { app, protocol, crashReporter, Menu, contentTracing } from \"electron\";'; ^
+   $new = 'import { app, protocol, crashReporter, contentTracing } from \"electron\";'\"`r`n\"'let Menu;'\"`r`n\"'try { Menu = require(\"electron\").Menu; } catch { }'; ^
+   $c = $c.Replace($old, $new); ^
+   $c = $c -replace 'Menu\.setApplicationMenu\(null\);', 'Menu?.setApplicationMenu(null);'; ^
+   [System.IO.File]::WriteAllText('out\main.js', $c)"
 goto :eof
 
 REM =====================================================================

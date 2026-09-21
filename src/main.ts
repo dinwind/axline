@@ -9,7 +9,8 @@ import * as os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { configurePortable } from './bootstrap-node.js';
 import { bootstrapESM } from './bootstrap-esm.js';
-import { app, protocol, crashReporter, Menu, contentTracing } from 'electron';
+let Menu: typeof import('electron').Menu | undefined; try { Menu = require('electron').Menu; } catch { /* Electron >= 42 */ }
+import { app, protocol, crashReporter, contentTracing } from 'electron';
 import minimist from 'minimist';
 import { product } from './bootstrap-meta.js';
 import { parse } from './vs/base/common/jsonc.js';
@@ -67,7 +68,7 @@ app.setPath('userData', userDataPath);
 const codeCachePath = getCodeCachePath();
 
 // Disable default menu (https://github.com/electron/electron/issues/35512)
-Menu.setApplicationMenu(null);
+Menu?.setApplicationMenu(null);
 
 // Configure crash reporter
 perf.mark('code/willStartCrashReporter');
